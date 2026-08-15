@@ -1,0 +1,42 @@
+name: Fix locale issues
+
+on:
+  push:
+    branches: [ master ]
+    paths:
+      - '**.xml'
+  workflow_dispatch:
+
+concurrency:
+  group: "locale"
+  cancel-in-progress: true
+
+# contents: write is required so the workflow can push the auto-fixed
+# files back to this same repo using the default GITHUB_TOKEN.
+# The original workflow used a GitHub App token scoped to
+# recloudstream/cloudstream specifically (to push past that repo's
+# branch protection); forks don't need that since GITHUB_TOKEN already
+# has write access to the fork itself.
+permissions:
+  contents: write
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Install dependencies
+      run: pip3 install lxml requests
+
+    - name: Edit files
+      run: python3 .github/locales.py
+
+    - name: Commit to the repo
+      run: |
+        git config --local user.email "actions@github.com"
+        git config --local user.name "GitHub Actions"
+        git add .
+        # "echo" returns true so the build succeeds, even if no changed files
+        git commit -m 'chore(locales): fix locale issues' || echo
+        git push

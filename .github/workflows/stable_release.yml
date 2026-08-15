@@ -1,0 +1,80 @@
+name: Stable Release
+
+# This does NOT run automatically on every push, unlike the other
+# workflows. It only runs when:
+#   1. You manually trigger it from the Actions tab ("Run workflow"), or
+#   2. You push a version tag (e.g. "v4.9.0") to the repo.
+# This mirrors how the upstream project only cuts an official "stable"
+# release when they decide it's ready, rather than on every commit.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: "stable-release"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v5
+      with:
+        distribution: temurin
+        java-version: 17
+
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
+
+    # Same personal keystore setup as build_to_archive.yml / prerelease.yml.
+    # Requires the KEYSTORE_BASE64 / KEYSTORE_PASSWORD / KEY_ALIAS repo
+    # secrets to already be configured.
+    - name: Restore keystore
+      id: fetch_keystore
+      run: |
+        TMP_KEYSTORE_FILE_PATH="${RUNNER_TEMP}"/keystore
+        mkdir -p "${TMP_KEYSTORE_FILE_PATH}"
+        echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > "${TMP_KEYSTORE_FILE_PATH}/release.keystore"
+        echo "::add-mask::${{ secrets.KEYSTORE_PASSWORD }}"
+        echo "key_pwd=${{ secrets.KEYSTORE_PASSWORD }}" >> $GITHUB_OUTPUT
+
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v5
+      with:
+        cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+
+    # app/build.gradle.kts has been updated so the "stable" flavor also
+    # applies the "prerelease" signingConfig (the original only wired
+    # it up for the "prerelease" flavor), so this now produces a
+    # properly signed APK instead of an unsigned one.
+    - name: Build stable APK
+      run: ./gradlew assembleStableRelease
+      env:
+        SIGNING_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        SIGNING_KEY_PASSWORD: ${{ steps.fetch_keystore.outputs.key_pwd }}
+        SIGNING_STORE_PASSWORD: ${{ steps.fetch_keystore.outputs.key_pwd }}
+        SIMKL_CLIENT_ID: ${{ secrets.SIMKL_CLIENT_ID }}
+        SIMKL_CLIENT_SECRET: ${{ secrets.SIMKL_CLIENT_SECRET }}
+        TRAKT_CLIENT_ID: ${{ secrets.TRAKT_CLIENT_ID }}
+        MDL_API_KEY: ${{ secrets.MDL_API_KEY }}
+        MAL_KEY: ${{ secrets.MAL_KEY }}
+        ANILIST_KEY: ${{ secrets.ANILIST_KEY }}
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: app/build/outputs/apk/stable/release/*.apk
+        # Uses the pushed tag name (e.g. "v4.9.0") as the release name
+        # when triggered by a tag push. Falls back to a manual run name
+        # when triggered via workflow_dispatch.
+        name: ${{ github.ref_type == 'tag' && github.ref_name || format('Manual build {0}', github.run_number) }}
+        tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('manual-{0}', github.run_number) }}
+        prerelease: false
