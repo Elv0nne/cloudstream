@@ -78,3 +78,4 @@ jobs:
         name: ${{ github.ref_type == 'tag' && github.ref_name || format('Manual build {0}', github.run_number) }}
         tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('manual-{0}', github.run_number) }}
         prerelease: false
+# trigger reindex
