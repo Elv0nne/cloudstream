@@ -1081,6 +1081,14 @@ class CS3IPlayer : IPlayer {
         /** External audio tracks to merge with the video */
         audioSources: List<MediaSource> = emptyList()
     ): ExoPlayer {
+        // Resolved once so it can be safely reused to derive the other buffer
+        // durations below without repeating the <= 0 fallback check.
+        val maxBufferMs = if (videoBufferMs <= 0) {
+            DefaultLoadControl.DEFAULT_MAX_BUFFER_MS
+        } else {
+            videoBufferMs.toInt()
+        }
+
         val exoPlayerBuilder =
             ExoPlayer.Builder(context)
                 .setMediaSourceFactory(
@@ -1237,14 +1245,28 @@ class CS3IPlayer : IPlayer {
                             true
                         )
                         .setBufferDurationsMs(
-                            DefaultLoadControl.DEFAULT_MIN_BUFFER_MS,
-                            if (videoBufferMs <= 0) {
-                                DefaultLoadControl.DEFAULT_MAX_BUFFER_MS
-                            } else {
-                                videoBufferMs.toInt()
-                            },
-                            DefaultLoadControl.DEFAULT_BUFFER_FOR_PLAYBACK_MS,
-                            DefaultLoadControl.DEFAULT_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS
+                            // `minBufferMs` must never exceed `maxBufferMs` or ExoPlayer's
+                            // DefaultLoadControl throws IllegalArgumentException on build().
+                            // Previously this was hardcoded to DEFAULT_MIN_BUFFER_MS (50s)
+                            // regardless of the user-selected max buffer, which both risked
+                            // that crash for any smaller custom buffer target and, even when
+                            // it didn't crash, left ExoPlayer unable to actually respect a
+                            // low buffer target since min was still pinned at 50s.
+                            minOf(
+                                DefaultLoadControl.DEFAULT_MIN_BUFFER_MS,
+                                maxBufferMs
+                            ),
+                            maxBufferMs,
+                            // bufferForPlaybackMs must also not exceed minBufferMs, otherwise
+                            // playback could never start under a very small custom buffer.
+                            minOf(
+                                DefaultLoadControl.DEFAULT_BUFFER_FOR_PLAYBACK_MS,
+                                minOf(DefaultLoadControl.DEFAULT_MIN_BUFFER_MS, maxBufferMs)
+                            ),
+                            minOf(
+                                DefaultLoadControl.DEFAULT_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS,
+                                minOf(DefaultLoadControl.DEFAULT_MIN_BUFFER_MS, maxBufferMs)
+                            )
                         ).build()
                 )
 
@@ -1584,6 +1606,34 @@ class CS3IPlayer : IPlayer {
 
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
                     super.onIsPlayingChanged(isPlaying)
+                    // SỬA LỖI (watch-progress ticker chết sau vài giây đầu, không bao giờ
+                    // chạy lại dù video vẫn đang phát bình thường -> không cộng điểm DCC dù
+                    // xem hết tập): trước đây StatusEvent (nguồn DUY NHẤT kích hoạt
+                    // GeneratorPlayer.playerStatusChanged() -> startWatchProgressTicker())
+                    // chỉ được bắn từ onPlayerStateChanged(playWhenReady, playbackState) bên
+                    // dưới — một callback ExoPlayer2 CŨ, đã deprecated (xem comment "fixme"
+                    // ngay tại khai báo của nó), giữ lại chỉ để tương thích ngược. Trong
+                    // Media3 1.9.3, callback này không còn được framework gọi lại đáng tin
+                    // cậy mỗi khi trạng thái playing thực sự chuyển từ buffering -> playing
+                    // sau lần đầu tiên: quan sát thực tế qua log cho thấy nó bắn đúng 1 lần
+                    // lúc mới mở video (buffer ban đầu) rồi không bao giờ bắn lại, dù video
+                    // sau đó phát mượt bình thường trong nhiều phút.
+                    //
+                    // onIsPlayingChanged(Boolean) là API Media3 hiện hành, được đảm bảo gọi
+                    // mỗi khi Player.isPlaying (kết hợp cả playbackState lẫn playWhenReady)
+                    // thực sự thay đổi — đây chính xác là tín hiệu "play/pause thật" mà
+                    // toàn bộ cơ chế StatusEvent/playerStatusChanged() vốn được thiết kế để
+                    // phản ánh. Bắn StatusEvent ở đây (thay vì/thêm vào onPlayerStateChanged)
+                    // đảm bảo GeneratorPlayer.playerStatusChanged() được gọi lại đúng lúc
+                    // mỗi khi playing chuyển true, nên startWatchProgressTicker() được bật
+                    // lại như kỳ vọng, sửa tận gốc nguyên nhân ticker chết vĩnh viễn.
+                    this@CS3IPlayer.isPlaying = isPlaying
+                    event(
+                        StatusEvent(
+                            wasPlaying = if (isPlaying) CSPlayerLoading.IsPaused else CSPlayerLoading.IsPlaying,
+                            isPlaying = if (isPlaying) CSPlayerLoading.IsPlaying else CSPlayerLoading.IsPaused
+                        )
+                    )
                     if (isPlaying) {
                         event(RequestAudioFocusEvent())
                         onRenderFirst()
@@ -2021,3 +2071,4 @@ class CS3IPlayer : IPlayer {
     }
 
 }
+ 
