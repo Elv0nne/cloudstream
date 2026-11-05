@@ -39,12 +39,21 @@ object ImageLoader {
     internal fun buildImageLoader(context: PlatformContext): ImageLoader {
         val isBrokenHardware = hasPotentialBrokenHardware()
         return ImageLoader.Builder(context)
-            .crossfade(200)
+            // TV: bỏ hiệu ứng mờ dần để cuộn danh sách poster mượt hơn trên GPU yếu
+            .crossfade(if (com.lagradost.cloudstream3.ui.settings.Globals.isLayout(
+                    com.lagradost.cloudstream3.ui.settings.Globals.TV
+                )) 0 else 200)
             .allowHardware(SDK_INT >= 28 && !isBrokenHardware)
             .diskCachePolicy(CachePolicy.ENABLED)
             .networkCachePolicy(CachePolicy.ENABLED)
             .memoryCache {
-                MemoryCache.Builder().maxSizePercent(context, 0.1)//10 % of heap for mem-cache
+                MemoryCache.Builder().maxSizePercent(
+                    context,
+                    // TV có nhiều poster hiển thị cùng lúc + dùng largeHeap -> nới 15%
+                    if (com.lagradost.cloudstream3.ui.settings.Globals.isLayout(
+                            com.lagradost.cloudstream3.ui.settings.Globals.TV
+                        )) 0.15 else 0.1
+                )
                     .strongReferencesEnabled(false)
                     .build()
             }
