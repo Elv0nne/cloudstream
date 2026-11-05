@@ -2,6 +2,7 @@
 
 package com.lagradost.cloudstream3.ui.player
 
+import com.lagradost.cloudstream3.ui.settings.Globals.TV
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.DialogInterface
@@ -837,6 +838,10 @@ class CS3IPlayer : IPlayer {
             )
         }
 
+        private const val FAST_BUFFER_FOR_PLAYBACK_MS = 1500
+        private const val FAST_BUFFER_AFTER_REBUFFER_MS = 3500
+        private val SDK_INT_FOR_CODEC get() = android.os.Build.VERSION.SDK_INT
+
         private fun getCache(context: Context, cacheSize: Long): SimpleCache? {
             return try {
                 val databaseProvider = StandaloneDatabaseProvider(context)
@@ -1120,6 +1125,9 @@ class CS3IPlayer : IPlayer {
                     val factory = if (isSoftwareDecodingEnabled) {
                         FixedNextRenderersFactory(context).apply {
                             setEnableDecoderFallback(true)
+                            if (SDK_INT_FOR_CODEC >= 29) {
+                                forceEnableMediaCodecAsynchronousQueueing()
+                            }
                             setExtensionRendererMode(
                                 if (isSoftwareDecodingPreferred)
                                     DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
@@ -1129,7 +1137,16 @@ class CS3IPlayer : IPlayer {
                         }
                     } else {
                         // no nextlib = EXTENSION_RENDERER_MODE_OFF
-                        DefaultRenderersFactory(context)
+                        DefaultRenderersFactory(context).apply {
+                            // TV/box có nhiều decoder (OMX.* / c2.*): nếu cái đầu tiên khởi tạo
+                            // lỗi thì thử cái kế tiếp thay vì báo lỗi phát ngay.
+                            setEnableDecoderFallback(true)
+                            // MediaCodec xếp hàng bất đồng bộ: giảm khựng/rớt khung hình trên
+                            // CPU yếu của TV box. Media3 chỉ bật mặc định từ API 31.
+                            if (SDK_INT_FOR_CODEC >= 29) {
+                                forceEnableMediaCodecAsynchronousQueueing()
+                            }
+                        }
                     }
 
                     val style = CustomDecoder.style
@@ -1259,12 +1276,14 @@ class CS3IPlayer : IPlayer {
                             maxBufferMs,
                             // bufferForPlaybackMs must also not exceed minBufferMs, otherwise
                             // playback could never start under a very small custom buffer.
+                            // Bắt đầu phát khi đủ 1.5s (mặc định 2.5s) -> vào video nhanh hơn.
                             minOf(
-                                DefaultLoadControl.DEFAULT_BUFFER_FOR_PLAYBACK_MS,
+                                FAST_BUFFER_FOR_PLAYBACK_MS,
                                 minOf(DefaultLoadControl.DEFAULT_MIN_BUFFER_MS, maxBufferMs)
                             ),
+                            // Sau khi buffer cạn chờ 3.5s (mặc định 5s) rồi chạy tiếp.
                             minOf(
-                                DefaultLoadControl.DEFAULT_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS,
+                                FAST_BUFFER_AFTER_REBUFFER_MS,
                                 minOf(DefaultLoadControl.DEFAULT_MIN_BUFFER_MS, maxBufferMs)
                             )
                         ).build()
@@ -1279,14 +1298,26 @@ class CS3IPlayer : IPlayer {
         val dataSourceFactory = if (onlineSource == null) {
             null
         } else {
-            if (simpleCache == null)
-                simpleCache = getCache(context, simpleCacheSize)
-
-            val cacheFactory = CacheDataSource.Factory().apply {
-                simpleCache?.let { setCache(it) }
-                setUpstreamDataSourceFactory(onlineSource)
+            // SỬA LỖI HIỆU NĂNG: giá trị 0 ("Tự động") trước đây tạo SimpleCache với
+            // LeastRecentlyUsedCacheEvictor(0): mọi byte đều bị GHI ra đĩa rồi bị XOÁ ngay,
+            // chỉ tốn I/O (đặc biệt chậm trên bộ nhớ eMMC của TV box) mà không có lợi gì.
+            // Giờ "Tự động": TV/emulator không dùng cache đĩa, điện thoại dùng 64MB.
+            val effectiveDiskCache = when {
+                simpleCacheSize > 0 -> simpleCacheSize
+                isLayout(TV or EMULATOR) -> 0L
+                else -> 64L * 1024L * 1024L
             }
-            cacheFactory
+            if (effectiveDiskCache <= 0L) {
+                onlineSource
+            } else {
+                if (simpleCache == null)
+                    simpleCache = getCache(context, effectiveDiskCache)
+
+                CacheDataSource.Factory().apply {
+                    simpleCache?.let { setCache(it) }
+                    setUpstreamDataSourceFactory(onlineSource)
+                }
+            }
         }
 
         val defaultMediaSourceFactory = if (dataSourceFactory != null) {
@@ -1393,6 +1424,18 @@ class CS3IPlayer : IPlayer {
                 playbackPosition
             )
             setHandleAudioBecomingNoisy(true)
+            if (isLayout(TV or EMULATOR)) {
+                // TV có loa/eARC/optical: khai báo nội dung là PHIM để hệ thống chọn đúng
+                // đường âm thanh (passthrough Dolby Atmos / E-AC3 / DTS qua HDMI eARC)
+                // thay vì mặc định "unknown". Không đổi cách xử lý audio focus (giữ false).
+                setAudioAttributes(
+                    androidx.media3.common.AudioAttributes.Builder()
+                        .setUsage(androidx.media3.common.C.USAGE_MEDIA)
+                        .setContentType(androidx.media3.common.C.AUDIO_CONTENT_TYPE_MOVIE)
+                        .build(),
+                    false
+                )
+            }
             setPlaybackSpeed(playBackSpeed)
             this.addAnalyticsListener(tracksAnalyticsListener)
         }
