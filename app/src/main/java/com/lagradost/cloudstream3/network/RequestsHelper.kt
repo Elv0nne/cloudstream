@@ -33,6 +33,33 @@ fun buildDefaultClient(context: Context): OkHttpClient {
     return buildDefaultClient(context, false)
 }
 
+// HIỆU NĂNG / ỔN ĐỊNH: trước đây MỖI lần gọi buildDefaultClient (khởi động app, đổi DNS,
+// Coil tải ảnh...) đều tạo ra Cache + ConnectionPool + Dispatcher MỚI.
+//  - Nhiều okhttp3.Cache cùng trỏ 1 thư mục "http_cache" là KHÔNG được hỗ trợ (có thể hỏng journal).
+//  - Mỗi client có pool riêng nên kết nối TLS tới cùng CDN không được tái sử dụng giữa
+//    tải ảnh / gọi API / extension -> tốn thêm bắt tay TLS (rất chậm trên TV box yếu).
+//  - Dispatcher mặc định chỉ cho 5 request đồng thời / host, làm nghẽn các extension
+//    gọi song song (apmap) tới cùng 1 site.
+// Giờ cả 3 đều là singleton dùng chung cho mọi client (newBuilder() cũng thừa hưởng).
+private val sharedConnectionPool by lazy {
+    okhttp3.ConnectionPool(maxIdleConnections = 16, keepAliveDuration = 5, timeUnit = java.util.concurrent.TimeUnit.MINUTES)
+}
+private val sharedDispatcher by lazy {
+    okhttp3.Dispatcher().apply {
+        maxRequests = 64
+        maxRequestsPerHost = 16
+    }
+}
+@Volatile
+private var sharedHttpCache: Cache? = null
+private fun getSharedHttpCache(context: Context): Cache =
+    sharedHttpCache ?: synchronized(sharedConnectionPool) {
+        sharedHttpCache ?: Cache(
+            directory = File(context.cacheDir, "http_cache"),
+            maxSize = 50L * 1024L * 1024L // 50 MiB
+        ).also { sharedHttpCache = it }
+    }
+
 /** Only use ignoreSSL if you know what you are doing*/
 @Prerelease
 fun buildDefaultClient(context: Context, ignoreSSL: Boolean = false): OkHttpClient {
@@ -43,6 +70,10 @@ fun buildDefaultClient(context: Context, ignoreSSL: Boolean = false): OkHttpClie
     val baseClient = OkHttpClient.Builder()
         .followRedirects(true)
         .followSslRedirects(true)
+        .connectionPool(sharedConnectionPool)
+        .dispatcher(sharedDispatcher)
+        .protocols(listOf(okhttp3.Protocol.HTTP_2, okhttp3.Protocol.HTTP_1_1))
+        .retryOnConnectionFailure(true)
         .apply {
             if (ignoreSSL) {
                 ignoreAllSSLErrors()
@@ -51,10 +82,7 @@ fun buildDefaultClient(context: Context, ignoreSSL: Boolean = false): OkHttpClie
         .cache(
             // Note that you need to add a ResponseInterceptor to make this 100% active.
             // The server response dictates if and when stuff should be cached.
-            Cache(
-                directory = File(context.cacheDir, "http_cache"),
-                maxSize = 50L * 1024L * 1024L // 50 MiB
-            )
+            getSharedHttpCache(context)
         ).apply {
             when (dns) {
                 1 -> addGoogleDns()
